@@ -35,7 +35,7 @@ Mount Android devices (MTP) directly from Termux/Linux with:
 ## 🚀 Installation
 
 ```bash
-git clone https://github.com/YOURUSER/androidmount.git
+git clone https://github.com/yakultSouzz/androidmount.git
 cd androidmount
 chmod +x install.sh
 ./install.sh
