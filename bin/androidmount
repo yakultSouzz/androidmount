@@ -1,0 +1,188 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# =============================================================
+# AndroidMount Pro - Core v2.1
+# Profissional / Robusto / Otimizado
+# =============================================================
+
+BASE_MOUNT_POINT="$HOME/storage/Android_Mount"
+LOCK_FILE="${TMPDIR:-/tmp}/androidmount.lock"
+LOG_FILE="${TMPDIR:-/tmp}/androidmount.log"
+
+mkdir -p "$BASE_MOUNT_POINT"
+
+# ================= DEPENDÊNCIAS =================
+
+require_bin() {
+    command -v "$1" >/dev/null || {
+        echo "Dependência faltando: $1"
+        exit 1
+    }
+}
+
+require_bin simple-mtpfs
+require_bin fusermount
+
+# ================= LOCK =================
+
+exec 9>"$LOCK_FILE"
+flock -w 2 9 || { echo "🔒 Busy"; exit 1; }
+trap 'flock -u 9; rm -f "$LOCK_FILE"' EXIT
+
+# ================= LOG =================
+
+log() { echo "[$(date '+%H:%M:%S')] $*" >> "$LOG_FILE"; }
+log_error() { log "[ERRO] $*"; }
+log_debug() { [[ "$DEBUG" == "1" ]] && log "[DEBUG] $*"; }
+
+notify() {
+    local title="$1"
+    local msg="$2"
+    local icon="${3:-phone}"
+
+    command -v termux-notification >/dev/null &&
+        termux-notification --title "$title" --content "$msg" --icon "$icon" --priority high 2>/dev/null
+
+    command -v notify-send >/dev/null &&
+        notify-send -i "$icon" "$title" "$msg" 2>/dev/null
+
+    log "$title: $msg"
+}
+
+# ================= UTIL =================
+
+sanitize_name() {
+    if command -v iconv >/dev/null; then
+        echo "$1" | iconv -f UTF-8 -t ASCII//TRANSLIT 2>/dev/null
+    else
+        echo "$1"
+    fi | sed 's/[^a-zA-Z0-9._-]/_/g; s/^_+//; s/_+$//' | cut -c1-40
+}
+
+mounted_mountpoints() {
+    awk '$3 ~ /simple-mtpfs/ {print $2}' /proc/mounts 2>/dev/null
+}
+
+mounted_count() {
+    awk '$3 ~ /simple-mtpfs/ {c++} END {print c+0}' /proc/mounts 2>/dev/null
+}
+
+is_mounted() {
+    local mp="$BASE_MOUNT_POINT/$1"
+    mountpoint -q "$mp" 2>/dev/null || grep -q " $mp " /proc/mounts 2>/dev/null
+}
+
+get_mount_info() {
+    df -h "$1" 2>/dev/null | awk 'NR==2 {printf "%s/%s (%s livre)", $3,$2,$4}'
+}
+
+list_devices() {
+    simple-mtpfs -l 2>/dev/null | awk 'NF'
+}
+
+# ================= MOUNT =================
+
+mount_device() {
+    local num="$1"
+    local name="$2"
+    local safe
+    safe=$(sanitize_name "$name")
+
+    if is_mounted "$safe"; then
+        notify "Aviso" "$name já montado" "dialog-warning"
+        return 1
+    fi
+
+    local mp="$BASE_MOUNT_POINT/$safe"
+
+    if [[ -d "$mp" ]]; then
+        local i=1
+        while [[ -d "${mp}_$i" ]]; do ((i++)); done
+        mp="${mp}_$i"
+    fi
+
+    mkdir -p "$mp" || { notify "Erro" "Sem permissão" "dialog-error"; return 1; }
+
+    if simple-mtpfs --device "$num" "$mp" >>"$LOG_FILE" 2>&1; then
+        notify "Montado" "$name\n$(get_mount_info "$mp")" "folder-phone"
+        (sleep 0.5 && command -v xdg-open >/dev/null && xdg-open "$mp" &) 
+    else
+        rmdir "$mp" 2>/dev/null
+        notify "Erro" "Falha ao montar $name" "dialog-error"
+    fi
+}
+
+unmount_device() {
+    local mp="$1"
+    local name
+    name=$(basename "$mp")
+
+    if fusermount -u "$mp" 2>/dev/null || fusermount -uz "$mp" 2>/dev/null; then
+        rmdir "$mp" 2>/dev/null
+        notify "Desmontado" "$name removido" "phone-disconnected"
+        return 0
+    fi
+
+    notify "Erro" "Falha ao desmontar $name" "dialog-error"
+    return 1
+}
+
+unmount_all() {
+    mounted_mountpoints | while read -r mp; do
+        [[ -n "$mp" ]] && unmount_device "$mp"
+    done
+}
+
+# ================= STATUS =================
+
+status() {
+    local count
+    count=$(mounted_count)
+
+    if (( count > 0 )); then
+        if (( count == 1 )); then
+            local name
+            name=$(mounted_mountpoints | while read -r mp; do basename "$mp"; done | head -n1 | cut -c1-12)
+            echo "%{F#7aa2f7}📱%{F-} $name"
+        else
+            echo "%{F#7aa2f7}📱 $count%{F-}"
+        fi
+        return
+    fi
+
+    local avail
+    avail=$(list_devices | grep -c .)
+
+    if (( avail > 0 )); then
+        echo "%{F#e0af68}📲 $avail%{F-}"
+    else
+        echo "%{F#565f89}📱%{F-}"
+    fi
+}
+
+detailed() {
+    echo "=== AndroidMount Pro v2.1 ==="
+    echo "Data: $(date)"
+    echo
+
+    echo "Disponíveis:"
+    list_devices | sed 's/^/  • /'
+    echo
+    echo "Montados:"
+    mounted_mountpoints | while read -r mp; do
+        printf "  • %s (%s)\n" "$(basename "$mp")" "$(get_mount_info "$mp")"
+    done
+}
+
+# ================= MAIN =================
+
+case "$1" in
+    list) list_devices ;;
+    mount) mount_device "$2" "$3" ;;
+    unmount) unmount_all ;;
+    unmount-one) unmount_device "$2" ;;
+    status) status ;;
+    detailed) detailed ;;
+    log) tail -n 20 "$LOG_FILE" ;;
+    clear-log) > "$LOG_FILE" ;;
+    *) echo "Uso: androidmount {list|mount|unmount|status|detailed}" ;;
+esac
